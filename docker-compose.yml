@@ -1,0 +1,219 @@
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./monitoring/prometheus/alert.rules.yml:/etc/prometheus/alert.rules.yml
+    networks:
+      - observability-net
+    healthcheck:
+      test: [ "CMD", "wget", "--spider", "-q", "http://localhost:9090/-/ready" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    networks:
+      - observability-net
+    volumes:
+      - grafana-storage:/var/lib/grafana
+    healthcheck:
+      test: [ "CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - observability-net
+    healthcheck:
+      test: [ "CMD", "echo", "ruok", "|", "nc", "localhost", "2181", "|", "grep", "imok" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: [ "CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    networks:
+      - observability-net
+
+  # --- DATABASE (MariaDB) ---
+  mariadb:
+    image: mariadb:10.11
+    container_name: mariadb
+    restart: always
+    ports:
+      - "3306:3306"
+    environment:
+      MARIADB_ROOT_PASSWORD: root_password
+      MARIADB_DATABASE: events_db
+      MARIADB_USER: user
+      MARIADB_PASSWORD: password
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    networks:
+      - observability-net
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- EXPORTERS ---
+  kafka-exporter:
+    image: danielqsj/kafka-exporter
+    container_name: kafka-exporter
+    ports:
+      - "9308:9308"
+    restart: unless-stopped
+    command:
+      - "--kafka.server=kafka:9092"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - observability-net
+
+  mariadb-exporter:
+    image: prom/mysqld-exporter:latest
+    container_name: mariadb-exporter
+    command:
+      - "--mysqld.address=mariadb:3306"
+      - "--mysqld.username=user:password"
+    networks:
+      - observability-net
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9104/metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mc2:
+    build: ./services/mc2
+    container_name: mc2
+    env_file:
+      - .env
+    ports:
+      - "${MC2_PORT}:${MC2_PORT}"
+    depends_on:
+      - kafka
+    networks:
+      - observability-net
+
+  mc1:
+    build: ./services/mc1
+    container_name: mc1
+    env_file:
+      - .env
+    ports:
+      - "${MC1_PORT}:${MC1_PORT}"
+    depends_on:
+      - kafka
+      - mc2
+    networks:
+      - observability-net
+
+  mc3:
+    build: ./services/mc3
+    container_name: mc3
+    env_file:
+      - .env
+    ports:
+      - "${MC3_APPLICATION_PORT}:${MC3_APPLICATION_PORT}"
+    depends_on:
+      - kafka
+      - mc1
+    networks:
+      - observability-net
+
+  loki:
+    image: grafana/loki:2.9.2
+    container_name: loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/loki-config.yaml
+    user: "root"
+    volumes:
+      - ./monitoring/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki_chunks:/tmp/loki/chunks
+      - loki_index:/tmp/loki/index
+      - loki_rules:/tmp/loki/rules
+    networks:
+      - observability-net
+
+  alloy:
+    image: grafana/alloy:latest
+    container_name: alloy
+    user: root
+    ports:
+      - "9080:9080"
+    volumes:
+      - ./monitoring/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/log:/var/log:ro
+    environment:
+      GRAFANA_LOKI_URL: http://loki:3100/loki/api/v1/push
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:9080
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    networks:
+      - observability-net
+
+networks:
+  observability-net:
+    driver: bridge
+
+volumes:
+  grafana-storage:
+  kafka_data:
+  mariadb_data:
+  loki_data:
+  loki_chunks:
+  loki_index:
+  loki_rules:
