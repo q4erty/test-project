@@ -1,0 +1,9 @@
+[submodule "services/mc2"]
+	path = services/mc2
+	url = https://github.com/q4erty/QazCode_test.git
+[submodule "services/mc3"]
+	path = services/mc3
+	url = https://github.com/q4erty/test-microservice.git
+[submodule "services/mc1"]
+	path = services/mc1
+	url = https://github.com/Nazerke06/QazCode-Test-Tasks.git

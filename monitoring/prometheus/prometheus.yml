@@ -1,0 +1,31 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['prometheus:9090']
+
+  - job_name: 'mc1'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['mc1:8000']
+
+  - job_name: 'mc2'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['mc2:8080']
+
+  - job_name: 'mc3'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['mc3:8081']
+
+  - job_name: 'kafka-exporter'
+    static_configs:
+      - targets: ['kafka-exporter:9308']
+
+  - job_name: 'mariadb-exporter'
+    static_configs:
+      - targets: ['mariadb-exporter:9104']
